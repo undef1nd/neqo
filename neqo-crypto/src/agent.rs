@@ -137,6 +137,7 @@ pub struct SecretAgentInfo {
     ver: Version,
     cipher: Cipher,
     group: Group,
+    resumed: bool,
     early_data: bool,
     alpn: Option<String>,
 }
@@ -156,6 +157,7 @@ impl SecretAgentInfo {
             ver: info.protocolVersion as Version,
             cipher: info.cipherSuite as Cipher,
             group: info.keaGroup as Group,
+            resumed: info.resumed != 0,
             early_data: info.earlyDataAccepted != 0,
             alpn: get_alpn(fd, false)?,
         })
@@ -169,6 +171,9 @@ impl SecretAgentInfo {
     }
     pub fn key_exchange(&self) -> Group {
         self.group
+    }
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
     pub fn early_data_accepted(&self) -> bool {
         self.early_data
@@ -191,8 +196,8 @@ pub struct SecretAgent {
     auth_required: Box<bool>,
     /// Records any fatal alert that is sent by the stack.
     alert: Box<Option<Alert>>,
-    /// Records the last resumption token.
-    resumption: Box<Option<Vec<u8>>>,
+    /// The current time.
+    now: Box<u64>,
 
     extension_handlers: Vec<ExtensionTracker>,
     inf: Option<SecretAgentInfo>,
@@ -209,7 +214,7 @@ impl SecretAgent {
 
             auth_required: Box::new(false),
             alert: Box::new(None),
-            resumption: Box::new(None),
+            now: Box::new(0u64),
 
             extension_handlers: Default::default(),
             inf: Default::default(),
@@ -282,18 +287,9 @@ impl SecretAgent {
         }
     }
 
-    unsafe extern "C" fn resumption_token_cb(
-        _fd: *mut ssl::PRFileDesc,
-        token: *const u8,
-        len: c_uint,
-        arg: *mut c_void,
-    ) -> ssl::SECStatus {
-        let resumption_ptr = arg as *mut Option<Vec<u8>>;
-        let resumption = resumption_ptr.as_mut().unwrap();
-        let mut v = Vec::with_capacity(len as usize);
-        v.extend_from_slice(std::slice::from_raw_parts(token, len as usize));
-        *resumption = Some(v);
-        ssl::SECSuccess
+    unsafe extern "C" fn time_func(arg: *mut c_void) -> ssl::PRTime {
+        let now_ptr = arg as *mut u64 as *const u64;
+        *now_ptr.as_ref().unwrap() as ssl::PRTime
     }
 
     // Ready this for connecting.
@@ -317,10 +313,10 @@ impl SecretAgent {
         result::result(rv)?;
 
         let rv = unsafe {
-            ssl::SSL_SetResumptionTokenCallback(
+            ssl::SSL_SetTimeFunc(
                 self.fd,
-                Some(SecretAgent::resumption_token_cb),
-                &mut *self.resumption as *mut Option<Vec<u8>> as *mut c_void,
+                Some(SecretAgent::time_func),
+                &mut *self.now as *mut u64 as *mut c_void,
             )
         };
         result::result(rv)?;
@@ -334,6 +330,7 @@ impl SecretAgent {
         self.set_version_range(TLS_VERSION_1_3, TLS_VERSION_1_3)?;
         self.set_option(ssl::Opt::Locking, false)?;
         self.set_option(ssl::Opt::Tickets, false)?;
+        self.set_option(ssl::Opt::OcspStapling, true)?;
         Ok(())
     }
 
@@ -476,18 +473,6 @@ impl SecretAgent {
         CertificateChain::new(self.fd)
     }
 
-    /// Return the resumption token.
-    pub fn resumption_token(&self) -> Option<&Vec<u8>> {
-        (*self.resumption).as_ref()
-    }
-
-    /// Enable resumption, using a token previously provided.
-    pub fn set_resumption_token(&mut self, token: &[u8]) -> Res<()> {
-        let rv =
-            unsafe { ssl::SSL_SetResumptionToken(self.fd, token.as_ptr(), token.len() as c_uint) };
-        result::result(rv)
-    }
-
     /// Return any fatal alert that the TLS stack might have sent.
     pub fn alert(&self) -> &Option<Alert> {
         &*self.alert
@@ -548,13 +533,34 @@ impl SecretAgent {
         Ok(output)
     }
 
+    fn set_time(&mut self, now: u64) {
+        *self.now = now;
+    }
+
+    fn capture_records<F: FnOnce(&mut Self) -> Res<()>>(&mut self, f: F) -> Res<RecordList> {
+        self.set_raw(true)?;
+
+        // Setup for accepting records.
+        let mut records: Box<RecordList> = Default::default();
+        let records_ptr = &mut *records as *mut RecordList as *mut c_void;
+        let rv =
+            unsafe { ssl::SSL_RecordLayerWriteCallback(self.fd, Some(ingest_record), records_ptr) };
+        if rv != ssl::SECSuccess {
+            return Err(self.set_failed());
+        }
+
+        f(self)?;
+        Ok(*records)
+    }
+
     // Drive the TLS handshake, but get the raw content of records, not
     // protected records as bytes. This function is incompatible with
     // handshake(); use either this or handshake() exclusively.
     //
     // Ideally, this only includes records from the current epoch.
     // If you send data from multiple epochs, you might end up being sad.
-    pub fn handshake_raw(&mut self, _now: u64, input: Option<Record>) -> Res<RecordList> {
+    pub fn handshake_raw(&mut self, now: u64, input: Option<Record>) -> Res<RecordList> {
+        self.set_time(now);
         self.set_raw(true)?;
 
         // Setup for accepting records.
@@ -615,6 +621,9 @@ impl ::std::fmt::Display for SecretAgent {
 #[derive(Debug)]
 pub struct Client {
     agent: SecretAgent,
+
+    /// Records the last resumption token.
+    resumption: Box<Option<Vec<u8>>>,
 }
 
 impl Client {
@@ -626,7 +635,50 @@ impl Client {
         }
         result::result(unsafe { ssl::SSL_SetURL(agent.fd, url.unwrap().as_ptr()) })?;
         agent.ready(false)?;
-        Ok(Client { agent })
+        let mut client = Client {
+            agent,
+            resumption: Box::new(None),
+        };
+        client.ready()?;
+        Ok(client)
+    }
+
+    unsafe extern "C" fn resumption_token_cb(
+        _fd: *mut ssl::PRFileDesc,
+        token: *const u8,
+        len: c_uint,
+        arg: *mut c_void,
+    ) -> ssl::SECStatus {
+        let resumption_ptr = arg as *mut Option<Vec<u8>>;
+        let resumption = resumption_ptr.as_mut().unwrap();
+        let mut v = Vec::with_capacity(len as usize);
+        v.extend_from_slice(std::slice::from_raw_parts(token, len as usize));
+        *resumption = Some(v);
+        ssl::SECSuccess
+    }
+
+    fn ready(&mut self) -> Res<()> {
+        let rv = unsafe {
+            ssl::SSL_SetResumptionTokenCallback(
+                self.fd,
+                Some(Client::resumption_token_cb),
+                &mut *self.resumption as *mut Option<Vec<u8>> as *mut c_void,
+            )
+        };
+        result::result(rv)
+    }
+
+    /// Return the resumption token.
+    pub fn resumption_token(&self) -> Option<&Vec<u8>> {
+        (*self.resumption).as_ref()
+    }
+
+    /// Enable resumption, using a token previously provided.
+    pub fn set_resumption_token(&mut self, token: &[u8]) -> Res<()> {
+        let rv = unsafe {
+            ssl::SSL_SetResumptionToken(self.agent.fd, token.as_ptr(), token.len() as c_uint)
+        };
+        result::result(rv)
     }
 }
 
@@ -678,6 +730,31 @@ impl Server {
         agent.ready(true)?;
         Ok(Server { agent })
     }
+
+    // Initialize NSS anti-replay.
+    // This calls through to the SSL_InitAntiReplay API, though |now| and |window| are in microseconds
+    // to be consistent with the other APIs in this crate.
+    pub fn init_anti_replay(now: u64, window: u64, k: usize, bits: usize) -> Res<()> {
+        let rv = unsafe {
+            ssl::SSL_InitAntiReplay(
+                now as ssl::PRTime,
+                window as ssl::PRTime,
+                k as c_uint,
+                bits as c_uint,
+            )
+        };
+        result::result(rv)
+    }
+
+    pub fn send_ticket(&mut self, now: u64, extra: &[u8]) -> Res<RecordList> {
+        self.agent.set_time(now);
+        self.agent.capture_records(|agent| {
+            let rv = unsafe {
+                ssl::SSL_SendSessionTicket(agent.fd, extra.as_ptr(), extra.len() as c_uint)
+            };
+            result::result(rv)
+        })
+    }
 }
 
 impl Deref for Server {
@@ -704,8 +781,8 @@ impl Deref for Agent {
     type Target = SecretAgent;
     fn deref(&self) -> &SecretAgent {
         match self {
-            Agent::Client(c) => c.deref(),
-            Agent::Server(s) => s.deref(),
+            Agent::Client(c) => &*c,
+            Agent::Server(s) => &*s,
         }
     }
 }

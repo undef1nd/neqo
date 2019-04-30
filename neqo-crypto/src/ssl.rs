@@ -66,20 +66,16 @@ impl Opt {
     }
 }
 
-experimental_api!(SSL_SetResumptionTokenCallback(
+experimental_api!(SSL_GetCurrentEpoch(
     fd: *mut PRFileDesc,
-    cb: SSLResumptionTokenCallback,
-    arg: *mut c_void,
+    read_epoch: *mut PRUint16,
+    write_epoch: *mut PRUint16,
 ));
-experimental_api!(SSL_SecretCallback(
-    fd: *mut PRFileDesc,
-    cb: SSLSecretCallback,
-    arg: *mut c_void,
-));
-experimental_api!(SSL_RecordLayerWriteCallback(
-    fd: *mut PRFileDesc,
-    cb: SSLRecordWriteCallback,
-    arg: *mut c_void,
+experimental_api!(SSL_InitAntiReplay(
+    now: PRTime,
+    window: PRTime,
+    k: c_uint,
+    bits: c_uint,
 ));
 experimental_api!(SSL_RecordLayerData(
     fd: *mut PRFileDesc,
@@ -88,15 +84,35 @@ experimental_api!(SSL_RecordLayerData(
     data: *const u8,
     len: c_uint,
 ));
-experimental_api!(SSL_GetCurrentEpoch(
+experimental_api!(SSL_RecordLayerWriteCallback(
     fd: *mut PRFileDesc,
-    read_epoch: *mut PRUint16,
-    write_epoch: *mut PRUint16,
+    cb: SSLRecordWriteCallback,
+    arg: *mut c_void,
+));
+experimental_api!(SSL_SecretCallback(
+    fd: *mut PRFileDesc,
+    cb: SSLSecretCallback,
+    arg: *mut c_void,
+));
+experimental_api!(SSL_SendSessionTicket(
+    fd: *mut PRFileDesc,
+    token: *const u8,
+    len: c_uint,
 ));
 experimental_api!(SSL_SetResumptionToken(
     fd: *mut PRFileDesc,
     token: *const u8,
     len: c_uint,
+));
+experimental_api!(SSL_SetResumptionTokenCallback(
+    fd: *mut PRFileDesc,
+    cb: SSLResumptionTokenCallback,
+    arg: *mut c_void,
+));
+experimental_api!(SSL_SetTimeFunc(
+    fd: *mut PRFileDesc,
+    cb: SSLTimeFunc,
+    arg: *mut c_void,
 ));
 
 #[cfg(test)]

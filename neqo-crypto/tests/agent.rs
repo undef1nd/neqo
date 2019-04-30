@@ -78,7 +78,8 @@ fn raw() {
     assert_eq!(client_preinfo.max_early_data(), 0);
     assert_eq!(client_preinfo.alpn(), None);
 
-    let server_records = forward_records(&mut server, client_records).expect("read CH, send SH");
+    let server_records =
+        forward_records(NOW, &mut server, client_records).expect("read CH, send SH");
     assert!(server_records.len() > 0);
     assert_eq!(*server.state(), HandshakeState::InProgress);
 
@@ -90,7 +91,7 @@ fn raw() {
     assert_eq!(server_preinfo.max_early_data(), 0);
     assert_eq!(server_preinfo.alpn(), None);
 
-    let client_records = forward_records(&mut client, server_records).expect("send CF");
+    let client_records = forward_records(NOW, &mut client, server_records).expect("send CF");
     assert_eq!(client_records.len(), 0);
     assert_eq!(*client.state(), HandshakeState::AuthenticationPending);
 
@@ -102,7 +103,7 @@ fn raw() {
     assert!(client_records.len() > 0);
     assert!(client.state().connected());
 
-    let server_records = forward_records(&mut server, client_records).expect("finish");
+    let server_records = forward_records(NOW, &mut server, client_records).expect("finish");
     assert_eq!(server_records.len(), 0);
     assert!(server.state().connected());
 
@@ -241,4 +242,42 @@ fn alpn_server_only() {
 
     assert_eq!(None, client.info().unwrap().alpn());
     assert_eq!(None, server.info().unwrap().alpn());
+}
+
+#[test]
+fn resume() {
+    let token = resumption_setup(Resumption::WithoutZeroRtt);
+
+    let mut client = Client::new("server.example").expect("should create second client");
+    let mut server = Server::new(&["key"]).expect("should create second server");
+
+    client
+        .set_resumption_token(&token[..])
+        .expect("should accept token");
+    connect(&mut client, &mut server);
+
+    assert!(client.info().unwrap().resumed());
+    assert!(server.info().unwrap().resumed());
+}
+
+#[test]
+fn zero_rtt() {
+    let token = resumption_setup(Resumption::WithZeroRtt);
+
+    // Finally, 0-RTT should succeed.
+    let mut client = Client::new("server.example").expect("should create client");
+    let mut server = Server::new(&["key"]).expect("should create server");
+    client
+        .set_resumption_token(&token[..])
+        .expect("should accept token");
+    client
+        .set_option(Opt::EarlyData, true)
+        .expect("should enable 0-RTT");
+    server
+        .set_option(Opt::EarlyData, true)
+        .expect("should enable 0-RTT");
+
+    connect(&mut client, &mut server);
+    assert!(client.info().unwrap().early_data_accepted());
+    assert!(server.info().unwrap().early_data_accepted());
 }

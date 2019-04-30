@@ -34,6 +34,7 @@ pub use self::err::{Error, Res};
 pub use self::ext::{ExtensionHandler, ExtensionHandlerResult, ExtensionWriterResult};
 pub use self::p11::SymKey;
 pub use self::secrets::SecretDirection;
+pub use self::ssl::Opt;
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
