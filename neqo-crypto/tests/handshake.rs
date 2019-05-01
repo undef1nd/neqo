@@ -53,6 +53,7 @@ fn handshake(now: u64, client: &mut SecretAgent, server: &mut SecretAgent) {
 
 pub fn connect_at(now: u64, client: &mut SecretAgent, server: &mut SecretAgent) {
     handshake(now, client, server);
+    eprintln!("client: {:?}", client.state());
     assert!(client.state().connected());
     assert!(server.state().connected());
 }
@@ -86,12 +87,8 @@ pub fn resumption_setup(z: Resumption) -> Vec<u8> {
     let mut client = Client::new("server.example").expect("should create client");
     let mut server = Server::new(&["key"]).expect("should create server");
     if let Resumption::WithZeroRtt = z {
-        client
-            .enable_0rtt()
-            .expect("should enable 0-RTT");
-        server
-            .enable_0rtt(0xffffffff)
-            .expect("should enable 0-RTT");
+        client.enable_0rtt().expect("should enable 0-RTT");
+        server.enable_0rtt(0xffffffff).expect("should enable 0-RTT");
     }
 
     connect(&mut client, &mut server);

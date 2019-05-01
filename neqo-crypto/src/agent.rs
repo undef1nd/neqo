@@ -375,7 +375,7 @@ impl SecretAgent {
     }
 
     /// Enable 0-RTT.
-    pub fn enable_0rtt(&mut self) ->Res<()> {
+    pub fn enable_0rtt(&mut self) -> Res<()> {
         self.set_option(ssl::Opt::EarlyData, true)
     }
 
@@ -753,9 +753,9 @@ impl Server {
 
     /// Enable 0-RTT.  This shadows the function of the same name that can be accessed
     /// via the Deref implementation on Server.
-    pub fn enable_0rtt(&mut self, max_early_data: u32) ->Res<()> {
+    pub fn enable_0rtt(&mut self, max_early_data: u32) -> Res<()> {
         self.set_option(ssl::Opt::EarlyData, true)?;
-        let rv = unsafe{ssl::SSL_SetMaxEarlyDataSize(self.agent.fd, max_early_data)};
+        let rv = unsafe { ssl::SSL_SetMaxEarlyDataSize(self.agent.fd, max_early_data) };
         result::result(rv)
     }
 

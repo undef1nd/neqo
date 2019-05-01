@@ -25,8 +25,8 @@ use neqo_crypto::hp::{extract_hp, HpKey};
 
 use crate::frame::{decode_frame, AckRange, Frame, FrameType, StreamType};
 use crate::nss::{
-    Agent, Cipher, Client, Epoch, HandshakeState, Record, Server, SymKey, TLS_AES_128_GCM_SHA256,
-    TLS_AES_256_GCM_SHA384, TLS_VERSION_1_3,
+    Agent, Cipher, Client, Epoch, HandshakeState, Record, RecordList, Server, SymKey,
+    TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_VERSION_1_3,
 };
 use crate::packet::{
     decode_packet_hdr, decrypt_packet, encode_packet, ConnectionId, CryptoCtx, PacketDecoder,
@@ -35,7 +35,7 @@ use crate::packet::{
 use crate::recv_stream::{RecvStream, RxStreamOrderer, RX_STREAM_DATA_WINDOW};
 use crate::send_stream::{SendStream, TxBuffer};
 use crate::tparams::consts as tp_const;
-use crate::tparams::TransportParametersHandler;
+use crate::tparams::{TransportParameters, TransportParametersHandler};
 use crate::tracking::RecvdPackets;
 use crate::{AppError, ConnectionError, Error, Recvable, Res, Sendable};
 
@@ -60,6 +60,15 @@ const LOCAL_MAX_DATA: u64 = 0x3FFF_FFFF_FFFF_FFFE; // 2^62-1
 pub enum Role {
     Client,
     Server,
+}
+
+impl Role {
+    pub fn peer(&self) -> Self {
+        match self {
+            Role::Client => Role::Server,
+            Role::Server => Role::Client,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -569,7 +578,7 @@ impl From<&Datagram> for Path {
 pub struct Connection {
     version: crate::packet::Version,
     paths: Option<Path>,
-    rol: Role,
+    role: Role,
     state: State,
     tls: Agent,
     tps: Rc<RefCell<TransportParametersHandler>>,
@@ -606,7 +615,7 @@ impl Debug for Connection {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!(
             "{:?} Connection: {:?} {:?}",
-            self.rol, self.state, self.paths
+            self.role, self.state, self.paths
         ))
     }
 }
@@ -664,7 +673,8 @@ impl Connection {
         match agent {
             Agent::Client(c) => c.enable_0rtt(),
             Agent::Server(s) => s.enable_0rtt(0xffffffff),
-        }.expect("Could not enable 0-RTT");
+        }
+        .expect("Could not enable 0-RTT");
     }
 
     fn new<A: ToString, I: IntoIterator<Item = A>>(
@@ -708,7 +718,7 @@ impl Connection {
         let mut c = Connection {
             version: QUIC_VERSION,
             paths,
-            rol: r,
+            role: r,
             state: match r {
                 Role::Client => State::Init,
                 Role::Server => State::WaitInitial,
@@ -753,13 +763,23 @@ impl Connection {
         };
 
         c.scid = c.generate_cid();
-        if c.rol == Role::Client {
+        if c.role == Role::Client {
             let dcid = c.generate_cid();
             c.create_initial_crypto_state(&dcid);
             c.dcid = dcid;
         }
 
         c
+    }
+
+    /// Get the current role.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Get the state of the connection.
+    pub fn state(&self) -> &State {
+        &self.state
     }
 
     /// Set ALPN preferences. Strings that appear earlier in the list are given
@@ -769,14 +789,73 @@ impl Connection {
         Ok(())
     }
 
-    /// Get the current role.
-    pub fn role(&self) -> Role {
-        self.rol
+    /// Access the latest resumption token on the connection.
+    pub fn resumption_token(&self) -> Option<Vec<u8>> {
+        if self.state != State::Connected {
+            return None;
+        }
+        match self.tls {
+            Agent::Client(ref c) => match c.resumption_token() {
+                Some(ref t) => {
+                    qtrace!("TLS token {}", hex(&t));
+                    let mut d = Data::default();
+                    d.encode_varlen(2, |mut d_tp| {
+                        self.tps
+                            .borrow()
+                            .remote
+                            .as_ref()
+                            .expect("need peer transport parameters")
+                            .encode(self.role.peer(), &mut d_tp)
+                            .expect("can't encode peer's transport parameters");
+                    });
+                    d.encode_vec(&t[..]);
+                    qinfo!("resumption token {}", hex(d.as_vec()));
+                    Some(d.decode_remainder().expect("should be ok"))
+                }
+                None => None,
+            },
+            Agent::Server(_) => None,
+        }
     }
 
-    /// Get the state of the connection.
-    pub fn state(&self) -> &State {
-        &self.state
+    /// Set a token for session resumption and maybe 0-RTT.  This will fail on a server.
+    pub fn set_resumption_token(&mut self, token: &[u8]) -> Res<()> {
+        // TODO(mt) unnecessary copy.
+        qinfo!(self, "resumption token {}", hex(token));
+        let mut d = Data::from_slice(token);
+        let tp_len = d.decode_uint(2)?;
+        let tp_slice = d.decode_data(tp_len as usize)?;
+        qtrace!(self, "  transport parameters {}", hex(&tp_slice));
+        // TODO(mt) unnecessary copy, again.
+        let mut d_tp = Data::from_slice(&tp_slice);
+        let tp = TransportParameters::decode(self.role, &mut d_tp)?;
+        self.tps.borrow_mut().remote_0rtt = Some(tp);
+        self.set_initial_maximums();
+
+        let tok = d.decode_remainder()?;
+        qtrace!(self, "  TLS token {}", hex(&tok));
+        match self.tls {
+            Agent::Client(ref mut c) => Ok(c.set_resumption_token(&tok)?),
+            Agent::Server(_) => Err(Error::WrongRole),
+        }
+    }
+
+    /// Send a session ticket, which will enable resumption at the peer.
+    pub fn send_ticket(&mut self, now: u64) -> Res<()> {
+        match self.tls {
+            Agent::Server(ref mut s) => {
+                let mut d = Data::default();
+                self.tps
+                    .borrow()
+                    .local
+                    .encode(self.role, &mut d)
+                    .expect("can't encode own transport parameters");
+                let records = s.send_ticket(now, d.as_vec())?;
+                self.buffer_crypto_records(records);
+                Ok(())
+            }
+            Agent::Client(_) => Err(Error::WrongRole),
+        }
     }
 
     // This function wraps a call to another function and sets the connection state
@@ -856,7 +935,7 @@ impl Connection {
     fn input(&mut self, d: Datagram, cur_time: u64) -> Res<()> {
         let mut slc = &d[..];
 
-        qdebug!(self, "input {}", hex("", &**d));
+        qdebug!(self, "input {}", hex(&**d));
 
         // Handle each packet in the datagram
         while !slc.is_empty() {
@@ -877,7 +956,7 @@ impl Connection {
                 State::WaitInitial => {
                     // Our DCID is the other side's SCID.
                     let scid = &hdr.scid.as_ref().unwrap().0;
-                    if self.rol == Role::Server {
+                    if self.role == Role::Server {
                         if hdr.dcid.len() < 8 {
                             qwarn!(self, "Peer DCID is too short");
                             return Ok(());
@@ -1112,7 +1191,7 @@ impl Connection {
         // Put packets in UDP datagrams
         let mut out_dgrams = out_packets
             .into_iter()
-            .inspect(|p| qdebug!(self, "{}", hex("Packet", p)))
+            .inspect(|p| qdebug!(self, "packet {}", hex(p)))
             .fold(Vec::new(), |mut vec: Vec<Datagram>, packet| {
                 let new_dgram: bool = vec
                     .last()
@@ -1127,7 +1206,7 @@ impl Connection {
             });
 
         // Pad Initial packets sent by the client to 1200 bytes.
-        if self.rol == Role::Client && initial_only && !out_dgrams.is_empty() {
+        if self.role == Role::Client && initial_only && !out_dgrams.is_empty() {
             qdebug!(self, "pad Initial to 1200");
             out_dgrams.last_mut().unwrap().resize(1200, 0);
         }
@@ -1173,6 +1252,54 @@ impl Connection {
         ));
     }
 
+    /// Buffer crypto records for sending.
+    fn buffer_crypto_records(&mut self, records: RecordList) {
+        for r in records {
+            assert_eq!(r.ct, 22);
+            if r.epoch == 1 {
+                qinfo!(self, "Discarding EndOfEarlyData");
+                assert_eq!(r.data, &[]);
+            } else {
+                qdebug!(self, "Inserting message {:?}", r);
+                self.crypto_streams[r.epoch as usize].tx.send(&r.data);
+            }
+        }
+    }
+
+    /// Access remote transport parameters.
+    /// The closure is called with a mutable reference to this and an immutable reference
+    /// to the applicable set of transport parameters.
+    fn with_remote_tps<T, F: FnOnce(&mut Self, &TransportParameters) -> T>(&mut self, f: F) -> Option<T> {
+        let mut r = None;
+        let swap = mem::replace(&mut self.tps, Rc::default());
+        {
+            let tph = swap.borrow();
+            let tps = match (tph.remote_0rtt.as_ref(), tph.remote.as_ref()) {
+                (Some(t), _) => Some(t),
+                (_, Some(t)) => Some(t),
+                _ => None,
+            };
+            if let Some(ref t) = tps {
+                r = Some(f(self, t));
+            };
+        }
+        mem::replace(&mut self.tps, swap);
+        r
+    }
+
+    fn set_initial_maximums(&mut self) {
+        let ok = self.with_remote_tps(|c, tps| {
+            c.peer_max_stream_idx_bidi =
+                StreamIndex::new(tps.get_integer(tp_const::INITIAL_MAX_STREAMS_BIDI));
+            c.peer_max_stream_idx_uni =
+                StreamIndex::new(tps.get_integer(tp_const::INITIAL_MAX_STREAMS_UNI));
+            c.flow_mgr
+                .borrow_mut()
+                .conn_increase_max_credit(tps.get_integer(tp_const::INITIAL_MAX_DATA));
+        });
+        assert!(ok.is_some());
+    }
+
     fn handshake(&mut self, epoch: u16, data: Option<&[u8]>) -> Res<()> {
         qdebug!("Handshake epoch={} data={:0x?}", epoch, data);
         let mut rec: Option<Record> = None;
@@ -1204,43 +1331,12 @@ impl Connection {
                     _ => Error::CryptoError(e),
                 });
             }
-            Ok(msgs) => {
-                for m in msgs {
-                    qdebug!(self, "Inserting message {:?}", m);
-                    assert_eq!(m.ct, 22);
-                    self.crypto_streams[m.epoch as usize].tx.send(&m.data);
-                }
-            }
-        }
+            Ok(msgs) => self.buffer_crypto_records(msgs),
+        };
         if self.tls.state().connected() {
             qinfo!(self, "TLS handshake completed");
             self.set_state(State::Connected);
-
-            self.peer_max_stream_idx_bidi = StreamIndex::new(
-                self.tps
-                    .borrow()
-                    .remote
-                    .as_ref()
-                    .expect("remote tparams are valid when State::Connected")
-                    .get_integer(tp_const::INITIAL_MAX_STREAMS_BIDI),
-            );
-
-            self.peer_max_stream_idx_uni = StreamIndex::new(
-                self.tps
-                    .borrow()
-                    .remote
-                    .as_ref()
-                    .expect("remote tparams are valid when State::Connected")
-                    .get_integer(tp_const::INITIAL_MAX_STREAMS_UNI),
-            );
-            self.flow_mgr.borrow_mut().conn_increase_max_credit(
-                self.tps
-                    .borrow()
-                    .remote
-                    .as_ref()
-                    .expect("remote tparams are valid when State::Connected")
-                    .get_integer(tp_const::INITIAL_MAX_DATA),
-            );
+            self.set_initial_maximums();
         }
         Ok(())
     }
@@ -1473,16 +1569,16 @@ impl Connection {
     fn create_initial_crypto_state(&mut self, dcid: &[u8]) {
         qinfo!(
             self,
-            "Creating initial cipher state role={:?} {}",
-            self.rol,
-            hex("DCID", dcid)
+            "Creating initial cipher state role={:?} dcid={}",
+            self.role,
+            hex(dcid)
         );
         //assert!(matches!(None, self.crypto_states[0]));
 
         let cds = CryptoDxState::new_initial("client in", dcid);
         let sds = CryptoDxState::new_initial("server in", dcid);
 
-        self.crypto_states[0] = Some(match self.rol {
+        self.crypto_states[0] = Some(match self.role {
             Role::Client => CryptoState {
                 epoch: 0,
                 tx: cds,
@@ -1606,7 +1702,7 @@ impl Connection {
 
         if stream_idx >= *next_stream_idx {
             // Creating new stream(s)
-            match (stream_id.is_client_initiated(), self.rol) {
+            match (stream_id.is_client_initiated(), self.role) {
                 (true, Role::Client) | (false, Role::Server) => {
                     qwarn!(
                         "Peer attempted to create local stream: {}",
@@ -1705,7 +1801,7 @@ impl Connection {
                 }
                 let new_id = self
                     .peer_next_stream_idx_uni
-                    .to_stream_id(StreamType::UniDi, self.rol);
+                    .to_stream_id(StreamType::UniDi, self.role);
                 self.peer_next_stream_idx_uni += 1;
                 let initial_max_stream_data = self
                     .tps
@@ -1735,7 +1831,7 @@ impl Connection {
                 }
                 let new_id = self
                     .peer_next_stream_idx_bidi
-                    .to_stream_id(StreamType::BiDi, self.rol);
+                    .to_stream_id(StreamType::BiDi, self.role);
                 self.peer_next_stream_idx_bidi += 1;
                 let send_initial_max_stream_data = self
                     .tps
@@ -1888,24 +1984,24 @@ impl Connection {
 
 impl ::std::fmt::Display for Connection {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        write!(f, "{:?} {:p}", self.rol, self as *const Connection)
+        write!(f, "{:?} {:p}", self.role, self as *const Connection)
     }
 }
 
 impl CryptoCtx for CryptoDxState {
     fn compute_mask(&self, sample: &[u8]) -> Res<Vec<u8>> {
         let mask = self.hpkey.mask(sample)?;
-        qdebug!("HP {} {}", hex("sample", sample), hex("mask", &mask));
+        qdebug!("HP sample {} mask {}", hex(sample), hex(&mask));
         Ok(mask)
     }
 
     fn aead_decrypt(&self, pn: PacketNumber, hdr: &[u8], body: &[u8]) -> Res<Vec<u8>> {
         qinfo!(
-            "aead_decrypt label={} pn={} {} {}",
+            "aead_decrypt label={} pn={} hdr={} body={}",
             &self.label,
             pn,
-            hex("hdr", hdr),
-            hex("body", body)
+            hex(hdr),
+            hex(body)
         );
         let mut out = Vec::with_capacity(body.len());
         out.resize(body.len(), 0);
@@ -1915,11 +2011,11 @@ impl CryptoCtx for CryptoDxState {
 
     fn aead_encrypt(&self, pn: PacketNumber, hdr: &[u8], body: &[u8]) -> Res<Vec<u8>> {
         qinfo!(
-            "aead_encrypt label={} pn={} {} {}",
+            "aead_encrypt label={} pn={} hdr={} body={}",
             self.label,
             pn,
-            hex("hdr", hdr),
-            hex("body", body)
+            hex(hdr),
+            hex(body)
         );
 
         let size = body.len() + MAX_AUTH_TAG;
@@ -1927,7 +2023,7 @@ impl CryptoCtx for CryptoDxState {
         out.resize(size, 0);
         let res = self.aead.encrypt(pn, hdr, body, &mut out)?;
 
-        qdebug!("aead_encrypt {}", hex("ct", res),);
+        qdebug!("aead_encrypt ct {}", hex(res));
 
         Ok(res.to_vec())
     }
@@ -2914,6 +3010,35 @@ mod tests {
         // and the client never sees the server's rejection of its handshake.
         //assert_error(&client, ConnectionError::Transport(Error::CryptoAlert(120)));
         assert_error(&server, ConnectionError::Transport(Error::CryptoAlert(120)));
+    }
+
+    fn exchange_ticket(client: &mut Connection, server: &mut Connection) -> Vec<u8> {
+        server.send_ticket(now()).expect("can send ticket");
+        let (dgrams, _timer) = server.process_output(now());
+        assert_eq!(dgrams.len(), 1);
+        client.process_input(dgrams, now());
+        assert_eq!(*client.state(), State::Connected);
+        client
+            .resumption_token()
+            .expect("should have token")
+    }
+
+    #[test]
+    fn resume() {
+        init_db("./db");
+        let mut client =
+            Connection::new_client("example.com", &["alpn"], loopback(), loopback()).unwrap();
+        let mut server = Connection::new_server(&["key"], &["alpn"]).unwrap();
+        connect(&mut client, &mut server);
+
+        let token = exchange_ticket(&mut client, &mut server);
+        let mut client =
+            Connection::new_client("example.com", &["alpn"], loopback(), loopback()).unwrap();
+        client
+            .set_resumption_token(&token[..])
+            .expect("should set token");
+        let mut server = Connection::new_server(&["key"], &["alpn"]).unwrap();
+        connect(&mut client, &mut server);
     }
 
     // LOSSRECOVERY tests

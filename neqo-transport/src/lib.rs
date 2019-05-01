@@ -54,6 +54,7 @@ pub enum Error {
     UnknownTransportParameter,
     ConnectionState,
     AckedUnsentPacket,
+    WrongRole,
 }
 
 impl Error {
@@ -86,7 +87,8 @@ impl Error {
             | Error::KeysNotFound
             | Error::UnknownTransportParameter
             | Error::ConnectionState
-            | Error::AckedUnsentPacket => 1,
+            | Error::AckedUnsentPacket
+            | Error::WrongRole => 1,
         }
     }
 }

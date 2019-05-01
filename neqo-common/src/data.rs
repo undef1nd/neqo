@@ -68,6 +68,16 @@ impl Data {
         self.buf.extend(d);
     }
 
+    pub fn encode_varlen<F: FnOnce(&mut Data)>(&mut self, len: usize, f: F) {
+        let start = self.buf.len();
+        self.buf.resize(self.buf.len() + len, 0);
+        f(self);
+        let sz = self.buf.len() - start - len;
+        for i in 0..len {
+            self.buf[start + i] = (sz >> ((len - 1 - i) * 8)) as u8;
+        }
+    }
+
     // Note: to encode a usize you will have to cast because
     // you can't From usize into u64 and vice versa.
     pub fn encode_uint<T: Into<u64>>(&mut self, v: T, l: usize) {
@@ -211,6 +221,23 @@ mod tests {
         let d2 = Data::from_hex("5678");
         d.encode_data(&d2);
         assert_eq!(d, Data::from_hex("0102345678"))
+    }
+
+    #[test]
+    fn encode_varlen() {
+        let mut d = Data::default();
+        d.encode_varlen(1, |_| {});
+        assert_eq!(d, Data::from_hex("00"));
+
+        let mut d = Data::default();
+        d.encode_varlen(2, |_| {});
+        assert_eq!(d, Data::from_hex("0000"));
+
+        let mut d = Data::default();
+        d.encode_varlen(3, |di| {
+            di.encode_byte(0x34);
+        });
+        assert_eq!(d, Data::from_hex("00000134"));
     }
 
     #[test]

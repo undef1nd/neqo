@@ -20,20 +20,28 @@ struct PreferredAddress {
 }
 
 pub mod consts {
-    pub const ORIGINAL_CONNECTION_ID: u16 = 0;
-    pub const IDLE_TIMEOUT: u16 = 1;
-    pub const STATELESS_RESET_TOKEN: u16 = 2;
-    pub const MAX_PACKET_SIZE: u16 = 3;
-    pub const INITIAL_MAX_DATA: u16 = 4;
-    pub const INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: u16 = 5;
-    pub const INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: u16 = 6;
-    pub const INITIAL_MAX_STREAM_DATA_UNI: u16 = 7;
-    pub const INITIAL_MAX_STREAMS_BIDI: u16 = 8;
-    pub const INITIAL_MAX_STREAMS_UNI: u16 = 9;
-    pub const ACK_DELAY_EXPONENT: u16 = 10;
-    pub const MAX_ACK_DELAY: u16 = 11;
-    pub const DISABLE_MIGRATION: u16 = 12;
-    pub const PREFERRED_ADDRESS: u16 = 13;
+    pub type TransportParameterId = u16;
+    macro_rules! tpids {
+        { $($n:ident = $v:expr),+ $(,)? } => {
+            $(pub const $n: TransportParameterId = $v as TransportParameterId;)+
+        };
+    }
+    tpids! {
+        ORIGINAL_CONNECTION_ID = 0,
+        IDLE_TIMEOUT = 1,
+        STATELESS_RESET_TOKEN = 2,
+        MAX_PACKET_SIZE = 3,
+        INITIAL_MAX_DATA = 4,
+        INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 5,
+        INITIAL_MAX_STREAM_DATA_BIDI_REMOTE = 6,
+        INITIAL_MAX_STREAM_DATA_UNI = 7,
+        INITIAL_MAX_STREAMS_BIDI = 8,
+        INITIAL_MAX_STREAMS_UNI = 9,
+        ACK_DELAY_EXPONENT = 10,
+        MAX_ACK_DELAY = 11,
+        DISABLE_MIGRATION = 12,
+        PREFERRED_ADDRESS = 13,
+    }
 }
 
 use self::consts::*;
@@ -163,12 +171,12 @@ impl TransportParameters {
         match role {
             Role::Server => {}
             Role::Client => {
-                let l = d.decode_uint(1)?;
-                d.decode_data(l as usize)?;
+                let versions_len = d.decode_uint(1)?;
+                d.decode_data(versions_len as usize)?;
             }
         }
 
-        qtrace!("Parsed fixed TP header");
+        qtrace!("Parsed fixed TP header, v={:x}", ver);
 
         let l = d.decode_uint(2)?;
         qtrace!("Remaining bytes: needed {} remaining {}", l, d.remaining());
@@ -270,6 +278,7 @@ impl TransportParameters {
 pub struct TransportParametersHandler {
     pub local: TransportParameters,
     pub remote: Option<TransportParameters>,
+    pub remote_0rtt: Option<TransportParameters>,
 }
 
 impl ExtensionHandler for TransportParametersHandler {
@@ -294,9 +303,9 @@ impl ExtensionHandler for TransportParametersHandler {
 
     fn handle(&mut self, msg: HandshakeMessage, d: &[u8]) -> ExtensionHandlerResult {
         qdebug!(
-            "Handling transport parameters, msg={:?} {}",
+            "Handling transport parameters, msg={:?} value {}",
             msg,
-            hex("Value", d),
+            hex(d),
         );
 
         let role = match msg {
