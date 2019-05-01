@@ -875,7 +875,7 @@ impl Connection {
                     return Ok(());
                 }
                 State::WaitInitial => {
-                    // Out DCID is the other side's SCID.
+                    // Our DCID is the other side's SCID.
                     let scid = &hdr.scid.as_ref().unwrap().0;
                     if self.rol == Role::Server {
                         if hdr.dcid.len() < 8 {
