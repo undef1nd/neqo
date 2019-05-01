@@ -87,10 +87,10 @@ pub fn resumption_setup(z: Resumption) -> Vec<u8> {
     let mut server = Server::new(&["key"]).expect("should create server");
     if let Resumption::WithZeroRtt = z {
         client
-            .set_option(Opt::EarlyData, true)
+            .enable_0rtt()
             .expect("should enable 0-RTT");
         server
-            .set_option(Opt::EarlyData, true)
+            .enable_0rtt(0xffffffff)
             .expect("should enable 0-RTT");
     }
 

@@ -99,6 +99,7 @@ experimental_api!(SSL_SendSessionTicket(
     token: *const u8,
     len: c_uint,
 ));
+experimental_api!(SSL_SetMaxEarlyDataSize(fd: *mut PRFileDesc, size: u32));
 experimental_api!(SSL_SetResumptionToken(
     fd: *mut PRFileDesc,
     token: *const u8,

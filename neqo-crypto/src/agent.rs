@@ -374,6 +374,11 @@ impl SecretAgent {
         result::result(unsafe { ssl::SSL_OptionSet(self.fd, opt.as_int(), opt.map_enabled(value)) })
     }
 
+    /// Enable 0-RTT.
+    pub fn enable_0rtt(&mut self) ->Res<()> {
+        self.set_option(ssl::Opt::EarlyData, true)
+    }
+
     /// set_alpn sets a list of preferred protocols, starting with the most preferred.
     /// Though ALPN [RFC7301] permits octet sequences, this only allows for UTF-8-encoded
     /// strings.
@@ -732,8 +737,8 @@ impl Server {
     }
 
     // Initialize NSS anti-replay.
-    // This calls through to the SSL_InitAntiReplay API, though |now| and |window| are in microseconds
-    // to be consistent with the other APIs in this crate.
+    // This calls through to the SSL_InitAntiReplay API, though |now| and |window| are
+    // in microseconds to be consistent with the other APIs in this crate.
     pub fn init_anti_replay(now: u64, window: u64, k: usize, bits: usize) -> Res<()> {
         let rv = unsafe {
             ssl::SSL_InitAntiReplay(
@@ -746,6 +751,17 @@ impl Server {
         result::result(rv)
     }
 
+    /// Enable 0-RTT.  This shadows the function of the same name that can be accessed
+    /// via the Deref implementation on Server.
+    pub fn enable_0rtt(&mut self, max_early_data: u32) ->Res<()> {
+        self.set_option(ssl::Opt::EarlyData, true)?;
+        let rv = unsafe{ssl::SSL_SetMaxEarlyDataSize(self.agent.fd, max_early_data)};
+        result::result(rv)
+    }
+
+    /// Send a session ticket to the client.
+    /// This adds |extra| application-specific content into that ticket.
+    /// The records that are sent are captured and returned.
     pub fn send_ticket(&mut self, now: u64, extra: &[u8]) -> Res<RecordList> {
         self.agent.set_time(now);
         self.agent.capture_records(|agent| {

@@ -271,10 +271,10 @@ fn zero_rtt() {
         .set_resumption_token(&token[..])
         .expect("should accept token");
     client
-        .set_option(Opt::EarlyData, true)
+        .enable_0rtt()
         .expect("should enable 0-RTT");
     server
-        .set_option(Opt::EarlyData, true)
+        .enable_0rtt(0xffffffff)
         .expect("should enable 0-RTT");
 
     connect(&mut client, &mut server);

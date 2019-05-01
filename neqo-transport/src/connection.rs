@@ -661,6 +661,10 @@ impl Connection {
             .extension_handler(0xffa5, tphandler)
             .expect("Could not set extension handler");
         agent.set_alpn(protocols).expect("Could not set ALPN");
+        match agent {
+            Agent::Client(c) => c.enable_0rtt(),
+            Agent::Server(s) => s.enable_0rtt(0xffffffff),
+        }.expect("Could not enable 0-RTT");
     }
 
     fn new<A: ToString, I: IntoIterator<Item = A>>(
