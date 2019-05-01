@@ -802,9 +802,7 @@ impl Connection {
                     d.encode_varlen(2, |mut d_tp| {
                         self.tps
                             .borrow()
-                            .remote
-                            .as_ref()
-                            .expect("need peer transport parameters")
+                            .remote()
                             .encode(self.role.peer(), &mut d_tp)
                             .expect("can't encode peer's transport parameters");
                     });
@@ -1266,41 +1264,20 @@ impl Connection {
         }
     }
 
-    /// Access remote transport parameters.
-    /// The closure is called with a mutable reference to this and an immutable reference
-    /// to the applicable set of transport parameters.
-    fn with_remote_tps<T, F: FnOnce(&mut Self, &TransportParameters) -> T>(
-        &mut self,
-        f: F,
-    ) -> Option<T> {
-        let mut r = None;
-        let swap = mem::replace(&mut self.tps, Rc::default());
-        {
-            let tph = swap.borrow();
-            let tps = match (tph.remote_0rtt.as_ref(), tph.remote.as_ref()) {
-                (Some(t), _) => Some(t),
-                (_, Some(t)) => Some(t),
-                _ => None,
-            };
-            if let Some(ref t) = tps {
-                r = Some(f(self, t));
-            };
-        }
-        mem::replace(&mut self.tps, swap);
-        r
-    }
-
     fn set_initial_maximums(&mut self) {
-        let ok = self.with_remote_tps(|c, tps| {
-            c.peer_max_stream_idx_bidi =
+        let swapped = mem::replace(&mut self.tps, Rc::default());
+        {
+            let tph = swapped.borrow();
+            let tps = tph.remote();
+            self.peer_max_stream_idx_bidi =
                 StreamIndex::new(tps.get_integer(tp_const::INITIAL_MAX_STREAMS_BIDI));
-            c.peer_max_stream_idx_uni =
+            self.peer_max_stream_idx_uni =
                 StreamIndex::new(tps.get_integer(tp_const::INITIAL_MAX_STREAMS_UNI));
-            c.flow_mgr
+            self.flow_mgr
                 .borrow_mut()
                 .conn_increase_max_credit(tps.get_integer(tp_const::INITIAL_MAX_DATA));
-        });
-        assert!(ok.is_some());
+        }
+        mem::replace(&mut self.tps, swapped);
     }
 
     fn handshake(&mut self, epoch: u16, data: Option<&[u8]>) -> Res<()> {
@@ -1755,9 +1732,7 @@ impl Connection {
                     let send_initial_max_stream_data = self
                         .tps
                         .borrow()
-                        .remote
-                        .as_ref()
-                        .expect("remote tparams are valid when State::Connected")
+                        .remote()
                         .get_integer(tp_const::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE);
                     self.send_streams.insert(
                         next_stream_id,
@@ -1809,11 +1784,8 @@ impl Connection {
                 let initial_max_stream_data = self
                     .tps
                     .borrow()
-                    .remote
-                    .as_ref()
-                    .expect("remote tparams are valid when State::Connected")
+                    .remote()
                     .get_integer(tp_const::INITIAL_MAX_STREAM_DATA_UNI);
-
                 self.send_streams.insert(
                     new_id,
                     SendStream::new(
@@ -1839,9 +1811,7 @@ impl Connection {
                 let send_initial_max_stream_data = self
                     .tps
                     .borrow()
-                    .remote
-                    .as_ref()
-                    .expect("remote tparams are valid when State::Connected")
+                    .remote()
                     .get_integer(tp_const::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE);
 
                 self.send_streams.insert(

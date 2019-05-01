@@ -281,6 +281,17 @@ pub struct TransportParametersHandler {
     pub remote_0rtt: Option<TransportParameters>,
 }
 
+impl TransportParametersHandler {
+    /// Return remote transport parameters.  Panics if there are none.
+    pub fn remote(&self) -> &TransportParameters {
+        match (self.remote_0rtt.as_ref(), self.remote.as_ref()) {
+            (Some(t), _) => t,
+            (_, Some(t)) => t,
+            _ => panic!("no remote transport parameters available"),
+        }
+    }
+}
+
 impl ExtensionHandler for TransportParametersHandler {
     fn write(&mut self, msg: HandshakeMessage, d: &mut [u8]) -> ExtensionWriterResult {
         let role = match msg {
