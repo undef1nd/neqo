@@ -81,7 +81,7 @@ pub fn resumption_setup(z: Resumption) -> Vec<u8> {
     // We need to pretend that initialization was in the past.
     // That way, the anti-replay filter is cleared when we try to connect at |NOW|.
     Server::init_anti_replay(NOW - ANTI_REPLAY_WINDOW, ANTI_REPLAY_WINDOW, 1, 3)
-                .expect("anti-replay setup successful");
+        .expect("anti-replay setup successful");
 
     let mut client = Client::new("server.example").expect("should create client");
     let mut server = Server::new(&["key"]).expect("should create server");
