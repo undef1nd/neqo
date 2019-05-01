@@ -1269,7 +1269,10 @@ impl Connection {
     /// Access remote transport parameters.
     /// The closure is called with a mutable reference to this and an immutable reference
     /// to the applicable set of transport parameters.
-    fn with_remote_tps<T, F: FnOnce(&mut Self, &TransportParameters) -> T>(&mut self, f: F) -> Option<T> {
+    fn with_remote_tps<T, F: FnOnce(&mut Self, &TransportParameters) -> T>(
+        &mut self,
+        f: F,
+    ) -> Option<T> {
         let mut r = None;
         let swap = mem::replace(&mut self.tps, Rc::default());
         {
@@ -3018,9 +3021,7 @@ mod tests {
         assert_eq!(dgrams.len(), 1);
         client.process_input(dgrams, now());
         assert_eq!(*client.state(), State::Connected);
-        client
-            .resumption_token()
-            .expect("should have token")
+        client.resumption_token().expect("should have token")
     }
 
     #[test]
