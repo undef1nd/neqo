@@ -6,7 +6,7 @@
 
 #![allow(unused_assignments)]
 
-use neqo_http3::{Http3Connection, Http3State, RequestStreamServer};
+use neqo_http3::{Http3Connection, Http3State};
 use neqo_transport::{Connection, Datagram};
 
 use std::net::SocketAddr;
@@ -17,14 +17,15 @@ fn loopback() -> SocketAddr {
     "127.0.0.1:443".parse().unwrap()
 }
 
-fn new_stream_callback(cr: &mut RequestStreamServer, error: bool) {
+fn new_stream_callback(
+    request_headers: &[(String, String)],
+    error: bool,
+) -> (Vec<(String, String)>, Vec<u8>) {
     println!("Error: {}", error);
-
-    let request_headers = cr.get_request_headers();
 
     assert_eq!(
         request_headers,
-        vec![
+        &[
             (String::from(":method"), String::from("GET")),
             (String::from(":scheme"), String::from("https")),
             (String::from(":authority"), String::from("something.com")),
@@ -32,13 +33,13 @@ fn new_stream_callback(cr: &mut RequestStreamServer, error: bool) {
         ]
     );
 
-    cr.set_response(
-        &vec![
+    (
+        vec![
             (String::from(":status"), String::from("200")),
             (String::from("content-length"), String::from("3")),
         ],
-        String::from("123"),
-    );
+        b"123".to_vec(),
+    )
 }
 
 fn connect() -> (Http3Connection, Http3Connection, (Vec<Datagram>, u64)) {
@@ -48,13 +49,14 @@ fn connect() -> (Http3Connection, Http3Connection, (Vec<Datagram>, u64)) {
         Connection::new_client("example.com", &["alpn"], loopback(), loopback()).unwrap(),
         100,
         100,
+        None,
     );
     let mut hconn_s = Http3Connection::new(
         Connection::new_server(&["key"], &["alpn"]).unwrap(),
         100,
         100,
+        Some(Box::new(new_stream_callback)),
     );
-    hconn_s.set_new_stream_callback(new_stream_callback);
 
     assert_eq!(hconn_c.state(), Http3State::Initializing);
     assert_eq!(hconn_s.state(), Http3State::Initializing);
