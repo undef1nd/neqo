@@ -2339,4 +2339,126 @@ mod tests {
         }
         assert!(recv_header && recv_data);
     }
+
+    fn do_fetch(hconn: &mut Http3Client, peer_conn: &mut Connection, request: &[u8]) {
+        let request_stream_id = hconn
+            .fetch(
+                "GET",
+                "https",
+                "something.com",
+                "/",
+                &[("something".to_string(), "something".to_string())],
+            )
+            .unwrap();
+
+        let _ = hconn.stream_close_send(request_stream_id);
+
+        let out = hconn.process(None, now());
+        peer_conn.process(out.dgram(), now());
+
+        // find the new request/response stream and send frame v on it.
+        let events = peer_conn.events().collect::<Vec<_>>();
+        for e in events {
+            if let ConnectionEvent::RecvStreamReadable { stream_id } = e {
+                if stream_id == request_stream_id {
+                    let mut buf = [0u8; 100];
+                    let (amount, fin) = peer_conn.stream_recv(stream_id, &mut buf).unwrap();
+                    assert_eq!(fin, true);
+                    assert_eq!(amount, request.len());
+                    assert_eq!(&buf[..request.len()], request);
+
+                    // send response - 200  Content-Length: 3
+                    // with content: 'abc'.
+                    let _ = peer_conn.stream_send(
+                        stream_id,
+                        &[
+                            // headers
+                            0x01, 0x06, 0x00, 0x00, 0xd9, 0x54, 0x01, 0x33,
+                            // the data frame
+                            0x0, 0x3, 0x61, 0x62, 0x63,
+                        ],
+                    );
+                    peer_conn.stream_close_send(stream_id).unwrap();
+                }
+            }
+        }
+        let out = peer_conn.process(None, now());
+        hconn.process(out.dgram(), now());
+
+        let http_events = hconn.events().collect::<Vec<_>>();
+        assert_eq!(http_events.len(), 2);
+        for e in http_events {
+            match e {
+                Http3ClientEvent::HeaderReady { stream_id } => {
+                    assert_eq!(stream_id, request_stream_id);
+                    let h = hconn.read_response_headers(stream_id);
+                    assert_eq!(
+                        h,
+                        Ok((
+                            vec![
+                                (String::from(":status"), String::from("200")),
+                                (String::from("content-length"), String::from("3"))
+                            ],
+                            false
+                        ))
+                    );
+                }
+                Http3ClientEvent::DataReadable { stream_id } => {
+                    assert_eq!(stream_id, request_stream_id);
+                    let mut buf = [0u8; 100];
+                    let (amount, fin) = hconn
+                        .read_response_data(now(), stream_id, &mut buf)
+                        .unwrap();
+                    assert_eq!(fin, true);
+                    assert_eq!(amount, 3);
+                    assert_eq!(buf[..3], [0x61, 0x62, 0x63]);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    const EXPECTED_NOT_ENCODER_REQUEST_HEADER: &[u8] = &[
+        0x01, 0x21, 0x00, 0x00, 0xd1, 0xd7, 0x50, 0x89, 0x41, 0xe9, 0x2a, 0x67, 0x35, 0x53, 0x2e,
+        0x43, 0xd3, 0xc1, 0x2f, 0x00, 0x41, 0xe9, 0x2a, 0x67, 0x35, 0x53, 0x7f, 0x87, 0x41, 0xe9,
+        0x2a, 0x67, 0x35, 0x53, 0x7f,
+    ];
+    const EXPECTED_ENCODER_REQUEST_HEADER: &[u8] = &[
+        0x01, 0x11, 0x02, 0x80, 0xd1, 0xd7, 0x50, 0x89, 0x41, 0xe9, 0x2a, 0x67, 0x35, 0x53, 0x2e,
+        0x43, 0xd3, 0xc1, 0x10,
+    ];
+
+    // Test fetch before settings will not encode header.
+    // and after setting is received it will.
+    #[test]
+    fn test_client_qpack_setting() {
+        let (mut hconn, mut neqo_trans_conn) = connect_and_receive_settings();
+
+        do_fetch(
+            &mut hconn,
+            &mut neqo_trans_conn,
+            EXPECTED_NOT_ENCODER_REQUEST_HEADER,
+        );
+
+        let control_stream = neqo_trans_conn.stream_create(StreamType::UniDi).unwrap();
+        let mut sent = neqo_trans_conn.stream_send(
+            control_stream,
+            &[0x0, 0x4, 0x6, 0x1, 0x40, 0x64, 0x7, 0x40, 0x64],
+        );
+        assert_eq!(sent, Ok(9));
+        let mut encoder = QPackEncoder::new(true);
+        encoder.add_send_stream(neqo_trans_conn.stream_create(StreamType::UniDi).unwrap());
+        encoder.send(&mut neqo_trans_conn).unwrap();
+        let decoder_stream = neqo_trans_conn.stream_create(StreamType::UniDi).unwrap();
+        sent = neqo_trans_conn.stream_send(decoder_stream, &[0x3]);
+        assert_eq!(sent, Ok(1));
+        let out = neqo_trans_conn.process(None, now());
+        hconn.process(out.dgram(), now());
+
+        do_fetch(
+            &mut hconn,
+            &mut neqo_trans_conn,
+            EXPECTED_ENCODER_REQUEST_HEADER,
+        );
+    }
 }

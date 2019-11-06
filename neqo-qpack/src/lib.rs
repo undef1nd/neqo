@@ -43,8 +43,13 @@ pub enum Error {
 
 impl Error {
     pub fn code(&self) -> neqo_transport::AppError {
-        // TODO(mt): use real codes once QPACK defines some.
-        3
+        match self {
+            Error::DecompressionFailed => 0x200,
+            Error::EncoderStreamError => 0x201,
+            Error::DecoderStreamError => 0x202,
+            Error::ClosedCriticalStream => 0x104,
+            _ => 0x101,
+        }
     }
 }
 
